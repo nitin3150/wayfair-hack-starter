@@ -6,6 +6,9 @@ import {
   getCustomerInteractions,
   getCustomerOrders,
 } from "@/lib/data/mock";
+import { scoreClaim, makeDecision } from "@/lib/fraud/scorer";
+import { adjustWithLLM } from "@/lib/fraud/llm-adjuster";
+import type { RefundClaim } from "@/lib/fraud/types";
 
 const TODAY = "2026-05-26";
 
@@ -372,6 +375,74 @@ export const processResolution = tool({
 });
 
 // ---------------------------------------------------------------------------
+// Tool 6: Score a specific refund claim (rule engine + LLM adjuster)
+// ---------------------------------------------------------------------------
+
+export const scoreRefundClaim = tool({
+  description:
+    "Score a refund claim using a 5-signal rule engine (0-100) plus an AI adjuster. " +
+    "Signals: refund history, delivery confirmation, customer LTV/account age, photo quality, prior chargebacks. " +
+    "Returns final_score, decision (AUTO_APPROVE / HUMAN_REVIEW / AUTO_DENY), top risk signals, and AI reasoning. " +
+    "Call AFTER lookupOrder and getCustomerHistory so you can populate the fields accurately.",
+  inputSchema: z.object({
+    claim_id: z.string().describe("Order ID or claim reference, e.g. ORD-1005"),
+    customer_name: z.string().describe("Customer full name"),
+    order_value: z.number().describe("Order total in dollars"),
+    customer_ltv: z.number().describe("Customer lifetime value (totalSpend from history)"),
+    refund_count_90_days: z.number().int().min(0).describe("Refunds filed by this customer in the last 90 days"),
+    account_age_days: z.number().int().min(0).describe("Days since account was created"),
+    days_since_delivery: z.number().int().min(0).describe("Days since the item was delivered"),
+    delivery_status: z
+      .enum(["gps_confirmed", "proxy_delivery", "carrier_exception", "no_scan"])
+      .describe(
+        "Delivery confirmation type. Use gps_confirmed for standard confirmed deliveries, " +
+        "proxy_delivery if left with neighbor/front desk, carrier_exception if delivery was flagged, " +
+        "no_scan if no delivery scan exists."
+      ),
+    photo_submitted: z.boolean().describe("Did the customer submit a photo with their claim?"),
+    photo_match: z
+      .enum(["matches", "generic", "metadata_mismatch", "not_submitted"])
+      .describe(
+        "Photo assessment: matches = photo clearly shows the claimed damage, " +
+        "generic = photo doesn't show specific damage, " +
+        "metadata_mismatch = photo metadata suggests it wasn't taken recently, " +
+        "not_submitted = no photo provided."
+      ),
+    prior_chargebacks: z.number().int().min(0).default(0).describe("Number of prior chargebacks on account (use 0 if unknown)"),
+    claim_filed_within_24hrs_of_delivery: z.boolean().describe("Was the claim filed within 24 hours of delivery?"),
+    claim_text: z.string().describe("The customer's own description of the issue (their exact words)"),
+    claim_right_before_window_closes: z.boolean().describe("Was claim filed within 3 days of the return window closing?"),
+  }),
+  execute: async (input) => {
+    const claim: RefundClaim = input as RefundClaim;
+    const breakdown = scoreClaim(claim);
+    const llmResult = await adjustWithLLM(claim, breakdown.base_score);
+    const { decision, action_text } = makeDecision(llmResult.final_score, 40, 70);
+
+    const riskLevel =
+      llmResult.final_score < 40 ? "LOW" : llmResult.final_score <= 70 ? "MEDIUM" : "HIGH";
+
+    return {
+      final_score: llmResult.final_score,
+      base_score: breakdown.base_score,
+      risk_level: riskLevel,
+      decision,
+      action_text,
+      sub_scores: breakdown.sub_scores,
+      top_signals: breakdown.top_signals,
+      ai_analysis:
+        breakdown.base_score >= 30 && breakdown.base_score <= 80
+          ? {
+              adjustment: llmResult.adjustment,
+              reasoning: llmResult.reasoning,
+              confidence: llmResult.confidence,
+            }
+          : null,
+    };
+  },
+});
+
+// ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
 
@@ -380,5 +451,6 @@ export const finopsTools = {
   getCustomerHistory,
   checkReturnEligibility,
   assessFraudRisk,
+  scoreRefundClaim,
   processResolution,
 };
