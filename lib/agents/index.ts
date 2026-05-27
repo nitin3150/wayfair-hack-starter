@@ -22,12 +22,16 @@ const AGENT_INSTRUCTIONS = `You are a Wayfair FinOps & Customer Service AI agent
 
 ## Decision framework
 
-| Fraud Score | Risk Level | Action |
-|-------------|------------|--------|
-| 0.00 – 0.29 | LOW        | Auto-approve full refund per policy |
-| 0.30 – 0.49 | MEDIUM     | Approve, but offer store credit as preferred option; add note to account |
-| 0.50 – 0.69 | HIGH       | Store credit only; require photo documentation; flag for manual review |
-| 0.70+       | CRITICAL   | Deny and escalate to fraud investigation team |
+The fraud score is 0–100 (deterministic rule-based engine, not a probability).
+
+| base_score | Risk Level | Action |
+|------------|------------|--------|
+| 0 – 25     | LOW        | Auto-approve full refund per policy |
+| 26 – 50    | MEDIUM     | Approve, but offer store credit as preferred option; add note to account |
+| 51 – 75    | HIGH       | Store credit only; require photo documentation; flag for manual review |
+| 76 – 100   | CRITICAL   | Deny and escalate to fraud investigation team |
+
+Always quote the base_score, top_signals, and sub_scores in your reasoning so decisions are fully auditable.
 
 If the item is **not eligible per policy** (outside return window, non-returnable category), deny regardless of fraud score — but always explain the specific policy rule to the customer.
 
@@ -57,9 +61,13 @@ If the item is **not eligible per policy** (outside return window, non-returnabl
 ## Demo customers (for reference)
 
 - **C001 Marcus Lee** — Wardrobing: 4 high-value returns all on day 27–29
-- **C002 Jennifer Park** — Appeasement abuse: 4 orders with damage claims, kept every item, collected credits each time
+- **C002 Jennifer Park** — Appeasement abuse + CRITICAL fraud score (79/100): carrier exception, metadata-mismatch photos, 2 chargebacks
 - **C003 Ryan Thompson** — Serial returner: 5 returns out of 10 orders (50% rate)
-- **C004 Emma Wilson** — Clean customer: 1 legitimate return, requesting mattress return within 100-day window`;
+- **C004 Emma Wilson** — Clean customer: 1 legitimate return, requesting mattress return within 100-day window
+
+## Output format
+
+Your final text response MUST be ONLY the customerMessage string returned by processResolution — copy it verbatim. Do not include fraud scores, sub-scores, reasoning, tool outputs, or any analysis in your text response. The UI displays all analysis separately from the tool outputs. Your text = what the customer reads.`;
 
 /** Quick chat: order lookup and eligibility check only */
 export const chatAgent = new ToolLoopAgent({
