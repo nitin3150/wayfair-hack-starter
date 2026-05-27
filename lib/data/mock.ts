@@ -24,8 +24,21 @@ export type ReturnReason =
   | "quality_issue"
   | "color_mismatch";
 
-// "return" = item shipped back; "appeasement" = customer kept item, got credit/discount
 export type InteractionType = "return" | "appeasement";
+
+// Carrier delivery confirmation status for fraud scoring
+export type DeliveryConfirmation =
+  | "gps_confirmed"
+  | "proxy_delivery"
+  | "carrier_exception"
+  | "no_scan";
+
+// Evidence quality of submitted damage photos
+export type DamagePhotoStatus =
+  | "matches"
+  | "not_submitted"
+  | "generic"
+  | "metadata_mismatch";
 
 export interface Customer {
   customerId: string;
@@ -34,6 +47,7 @@ export interface Customer {
   accountCreatedDate: string;
   totalOrders: number;
   totalSpend: number;
+  priorChargebacks: number;
 }
 
 export interface OrderItem {
@@ -52,6 +66,12 @@ export interface Order {
   deliveryDate: string;
   items: OrderItem[];
   totalAmount: number;
+  // Carrier-level delivery signal
+  deliveryConfirmation: DeliveryConfirmation;
+  // True if the return claim was filed within 24 hrs of delivery
+  claimFiledWithin24HrsOfDelivery: boolean;
+  // Quality of damage evidence submitted with the current claim
+  damagePhotoStatus: DamagePhotoStatus;
 }
 
 export interface ReturnInteraction {
@@ -66,7 +86,6 @@ export interface ReturnInteraction {
   daysSinceDelivery: number;
   reason: ReturnReason;
   reasonText: string;
-  // keptItem true = appeasement (customer never returned the product)
   keptItem: boolean;
   resolution: "full_refund" | "store_credit" | "partial_refund" | "replacement" | "denied";
   amountCredited: number;
@@ -84,6 +103,7 @@ export const CUSTOMERS: Customer[] = [
     accountCreatedDate: "2024-08-14",
     totalOrders: 5,
     totalSpend: 4428,
+    priorChargebacks: 0,
   },
   {
     customerId: "C002",
@@ -91,7 +111,8 @@ export const CUSTOMERS: Customer[] = [
     email: "jennifer.park@email.com",
     accountCreatedDate: "2025-01-03",
     totalOrders: 5,
-    totalSpend: 2886,
+    totalSpend: 400,
+    priorChargebacks: 2, // two prior chargebacks on account
   },
   {
     customerId: "C003",
@@ -100,6 +121,7 @@ export const CUSTOMERS: Customer[] = [
     accountCreatedDate: "2023-11-20",
     totalOrders: 10,
     totalSpend: 3422,
+    priorChargebacks: 0,
   },
   {
     customerId: "C004",
@@ -108,11 +130,15 @@ export const CUSTOMERS: Customer[] = [
     accountCreatedDate: "2022-06-10",
     totalOrders: 6,
     totalSpend: 2304,
+    priorChargebacks: 0,
   },
 ];
 
 // ---------------------------------------------------------------------------
 // Orders
+// Completed orders default: deliveryConfirmation gps_confirmed, no 24hr flag,
+// damagePhotoStatus matches (they were successfully processed).
+// Active (current) orders have specific values to drive fraud scoring.
 // ---------------------------------------------------------------------------
 
 export const ORDERS: Order[] = [
@@ -124,6 +150,9 @@ export const ORDERS: Order[] = [
     deliveryDate: "2026-01-15",
     items: [{ itemId: "I-1001", name: "Sectional Sofa", category: "furniture", price: 1299, quantity: 1, nonReturnable: false }],
     totalAmount: 1299,
+    deliveryConfirmation: "gps_confirmed",
+    claimFiledWithin24HrsOfDelivery: false,
+    damagePhotoStatus: "matches",
   },
   {
     orderId: "ORD-1002",
@@ -132,6 +161,9 @@ export const ORDERS: Order[] = [
     deliveryDate: "2026-02-12",
     items: [{ itemId: "I-1002", name: "Dining Table Set", category: "furniture", price: 899, quantity: 1, nonReturnable: false }],
     totalAmount: 899,
+    deliveryConfirmation: "gps_confirmed",
+    claimFiledWithin24HrsOfDelivery: false,
+    damagePhotoStatus: "matches",
   },
   {
     orderId: "ORD-1003",
@@ -140,6 +172,9 @@ export const ORDERS: Order[] = [
     deliveryDate: "2026-03-05",
     items: [{ itemId: "I-1003", name: "King Bed Frame", category: "furniture", price: 1100, quantity: 1, nonReturnable: false }],
     totalAmount: 1100,
+    deliveryConfirmation: "gps_confirmed",
+    claimFiledWithin24HrsOfDelivery: false,
+    damagePhotoStatus: "matches",
   },
   {
     orderId: "ORD-1004",
@@ -148,15 +183,21 @@ export const ORDERS: Order[] = [
     deliveryDate: "2026-04-10",
     items: [{ itemId: "I-1004", name: "Coffee Table", category: "furniture", price: 450, quantity: 1, nonReturnable: false }],
     totalAmount: 450,
+    deliveryConfirmation: "gps_confirmed",
+    claimFiledWithin24HrsOfDelivery: false,
+    damagePhotoStatus: "matches",
   },
   {
-    // Active case: 16 days since delivery, within window — agent should flag pattern
+    // Active case — 16 days since delivery, pattern expected to repeat
     orderId: "ORD-1005",
     customerId: "C001",
     orderDate: "2026-05-03",
     deliveryDate: "2026-05-10",
     items: [{ itemId: "I-1005", name: "Living Room Sofa", category: "furniture", price: 1450, quantity: 1, nonReturnable: false }],
     totalAmount: 1450,
+    deliveryConfirmation: "gps_confirmed",
+    claimFiledWithin24HrsOfDelivery: false,
+    damagePhotoStatus: "not_submitted",
   },
 
   // --- Jennifer Park (C002) — Appeasement abuse: keeps items, collects discounts ---
@@ -167,6 +208,9 @@ export const ORDERS: Order[] = [
     deliveryDate: "2026-02-05",
     items: [{ itemId: "I-2001", name: "5-Shelf Bookcase", category: "furniture", price: 299, quantity: 1, nonReturnable: false }],
     totalAmount: 299,
+    deliveryConfirmation: "gps_confirmed",
+    claimFiledWithin24HrsOfDelivery: false,
+    damagePhotoStatus: "matches",
   },
   {
     orderId: "ORD-2002",
@@ -175,6 +219,9 @@ export const ORDERS: Order[] = [
     deliveryDate: "2026-02-28",
     items: [{ itemId: "I-2002", name: "Accent Chair", category: "furniture", price: 499, quantity: 1, nonReturnable: false }],
     totalAmount: 499,
+    deliveryConfirmation: "gps_confirmed",
+    claimFiledWithin24HrsOfDelivery: false,
+    damagePhotoStatus: "matches",
   },
   {
     orderId: "ORD-2003",
@@ -183,6 +230,9 @@ export const ORDERS: Order[] = [
     deliveryDate: "2026-03-22",
     items: [{ itemId: "I-2003", name: "Patio Dining Set", category: "furniture", price: 699, quantity: 1, nonReturnable: false }],
     totalAmount: 699,
+    deliveryConfirmation: "gps_confirmed",
+    claimFiledWithin24HrsOfDelivery: false,
+    damagePhotoStatus: "matches",
   },
   {
     orderId: "ORD-2004",
@@ -191,18 +241,24 @@ export const ORDERS: Order[] = [
     deliveryDate: "2026-04-18",
     items: [{ itemId: "I-2004", name: "Bedside Table", category: "furniture", price: 189, quantity: 1, nonReturnable: false }],
     totalAmount: 189,
+    deliveryConfirmation: "gps_confirmed",
+    claimFiledWithin24HrsOfDelivery: false,
+    damagePhotoStatus: "matches",
   },
   {
-    // Active case: "large tear in fabric, requesting compensation"
+    // Active case — carrier exception on delivery; submitted photos with metadata mismatch (stock images)
     orderId: "ORD-2005",
     customerId: "C002",
     orderDate: "2026-05-08",
     deliveryDate: "2026-05-15",
     items: [{ itemId: "I-2005", name: "3-Seat Linen Sofa", category: "furniture", price: 1200, quantity: 1, nonReturnable: false }],
     totalAmount: 1200,
+    deliveryConfirmation: "carrier_exception",
+    claimFiledWithin24HrsOfDelivery: false,
+    damagePhotoStatus: "metadata_mismatch", // EXIF data shows photos taken months before delivery
   },
 
-  // --- Ryan Thompson (C003) — Serial returner: 5/10 orders returned (50%) ---
+  // --- Ryan Thompson (C003) — Serial returner: 5/10 orders returned ---
   {
     orderId: "ORD-3001",
     customerId: "C003",
@@ -210,6 +266,9 @@ export const ORDERS: Order[] = [
     deliveryDate: "2026-01-20",
     items: [{ itemId: "I-3001", name: "Ergonomic Desk Chair", category: "furniture", price: 299, quantity: 1, nonReturnable: false }],
     totalAmount: 299,
+    deliveryConfirmation: "gps_confirmed",
+    claimFiledWithin24HrsOfDelivery: false,
+    damagePhotoStatus: "matches",
   },
   {
     orderId: "ORD-3002",
@@ -218,6 +277,9 @@ export const ORDERS: Order[] = [
     deliveryDate: "2026-01-25",
     items: [{ itemId: "I-3002", name: "3-Shelf Bookcase", category: "furniture", price: 199, quantity: 1, nonReturnable: false }],
     totalAmount: 199,
+    deliveryConfirmation: "gps_confirmed",
+    claimFiledWithin24HrsOfDelivery: false,
+    damagePhotoStatus: "matches",
   },
   {
     orderId: "ORD-3003",
@@ -226,6 +288,9 @@ export const ORDERS: Order[] = [
     deliveryDate: "2026-02-10",
     items: [{ itemId: "I-3003", name: "Large Area Rug", category: "decor", price: 349, quantity: 1, nonReturnable: false }],
     totalAmount: 349,
+    deliveryConfirmation: "gps_confirmed",
+    claimFiledWithin24HrsOfDelivery: false,
+    damagePhotoStatus: "matches",
   },
   {
     orderId: "ORD-3004",
@@ -234,6 +299,9 @@ export const ORDERS: Order[] = [
     deliveryDate: "2026-02-20",
     items: [{ itemId: "I-3004", name: "Nightstand", category: "furniture", price: 159, quantity: 1, nonReturnable: false }],
     totalAmount: 159,
+    deliveryConfirmation: "gps_confirmed",
+    claimFiledWithin24HrsOfDelivery: false,
+    damagePhotoStatus: "matches",
   },
   {
     orderId: "ORD-3005",
@@ -242,6 +310,9 @@ export const ORDERS: Order[] = [
     deliveryDate: "2026-03-05",
     items: [{ itemId: "I-3005", name: "Floor Lamp", category: "decor", price: 89, quantity: 1, nonReturnable: false }],
     totalAmount: 89,
+    deliveryConfirmation: "gps_confirmed",
+    claimFiledWithin24HrsOfDelivery: false,
+    damagePhotoStatus: "matches",
   },
   {
     orderId: "ORD-3006",
@@ -250,6 +321,9 @@ export const ORDERS: Order[] = [
     deliveryDate: "2026-03-10",
     items: [{ itemId: "I-3006", name: "Throw Pillows 4-Pack", category: "decor", price: 65, quantity: 1, nonReturnable: false }],
     totalAmount: 65,
+    deliveryConfirmation: "gps_confirmed",
+    claimFiledWithin24HrsOfDelivery: false,
+    damagePhotoStatus: "matches",
   },
   {
     orderId: "ORD-3007",
@@ -258,6 +332,9 @@ export const ORDERS: Order[] = [
     deliveryDate: "2026-03-25",
     items: [{ itemId: "I-3007", name: "TV Media Stand", category: "furniture", price: 449, quantity: 1, nonReturnable: false }],
     totalAmount: 449,
+    deliveryConfirmation: "gps_confirmed",
+    claimFiledWithin24HrsOfDelivery: false,
+    damagePhotoStatus: "matches",
   },
   {
     orderId: "ORD-3008",
@@ -266,6 +343,9 @@ export const ORDERS: Order[] = [
     deliveryDate: "2026-04-15",
     items: [{ itemId: "I-3008", name: "Ottoman Set (2-pack)", category: "furniture", price: 229, quantity: 1, nonReturnable: false }],
     totalAmount: 229,
+    deliveryConfirmation: "gps_confirmed",
+    claimFiledWithin24HrsOfDelivery: false,
+    damagePhotoStatus: "matches",
   },
   {
     orderId: "ORD-3009",
@@ -274,18 +354,24 @@ export const ORDERS: Order[] = [
     deliveryDate: "2026-05-01",
     items: [{ itemId: "I-3009", name: "Decorative Wall Mirror", category: "decor", price: 185, quantity: 1, nonReturnable: false }],
     totalAmount: 185,
+    deliveryConfirmation: "gps_confirmed",
+    claimFiledWithin24HrsOfDelivery: false,
+    damagePhotoStatus: "matches",
   },
   {
-    // Active case: just placed, requesting return "color not as expected"
+    // Active case — 8 days since delivery, "color not as expected"
     orderId: "ORD-3010",
     customerId: "C003",
     orderDate: "2026-05-11",
     deliveryDate: "2026-05-18",
     items: [{ itemId: "I-3010", name: "Outdoor Furniture Set", category: "furniture", price: 650, quantity: 1, nonReturnable: false }],
     totalAmount: 650,
+    deliveryConfirmation: "gps_confirmed",
+    claimFiledWithin24HrsOfDelivery: false,
+    damagePhotoStatus: "not_submitted",
   },
 
-  // --- Emma Wilson (C004) — Clean customer: 1 legitimate return in 6 orders ---
+  // --- Emma Wilson (C004) — Clean customer: 1 legitimate return ---
   {
     orderId: "ORD-4001",
     customerId: "C004",
@@ -293,6 +379,9 @@ export const ORDERS: Order[] = [
     deliveryDate: "2026-02-01",
     items: [{ itemId: "I-4001", name: "6-Drawer Dresser", category: "furniture", price: 549, quantity: 1, nonReturnable: false }],
     totalAmount: 549,
+    deliveryConfirmation: "gps_confirmed",
+    claimFiledWithin24HrsOfDelivery: false,
+    damagePhotoStatus: "matches",
   },
   {
     orderId: "ORD-4002",
@@ -301,6 +390,9 @@ export const ORDERS: Order[] = [
     deliveryDate: "2026-02-15",
     items: [{ itemId: "I-4002", name: "Desk Lamp", category: "decor", price: 79, quantity: 1, nonReturnable: false }],
     totalAmount: 79,
+    deliveryConfirmation: "gps_confirmed",
+    claimFiledWithin24HrsOfDelivery: false,
+    damagePhotoStatus: "matches",
   },
   {
     orderId: "ORD-4003",
@@ -309,6 +401,9 @@ export const ORDERS: Order[] = [
     deliveryDate: "2026-03-01",
     items: [{ itemId: "I-4003", name: "Glass Coffee Table", category: "furniture", price: 329, quantity: 1, nonReturnable: false }],
     totalAmount: 329,
+    deliveryConfirmation: "gps_confirmed",
+    claimFiledWithin24HrsOfDelivery: false,
+    damagePhotoStatus: "matches",
   },
   {
     orderId: "ORD-4004",
@@ -317,6 +412,9 @@ export const ORDERS: Order[] = [
     deliveryDate: "2026-03-20",
     items: [{ itemId: "I-4004", name: "Chunky Knit Throw", category: "decor", price: 49, quantity: 1, nonReturnable: false }],
     totalAmount: 49,
+    deliveryConfirmation: "gps_confirmed",
+    claimFiledWithin24HrsOfDelivery: false,
+    damagePhotoStatus: "matches",
   },
   {
     orderId: "ORD-4005",
@@ -325,15 +423,21 @@ export const ORDERS: Order[] = [
     deliveryDate: "2026-04-10",
     items: [{ itemId: "I-4005", name: "Counter Height Bar Stools (set of 2)", category: "furniture", price: 399, quantity: 1, nonReturnable: false }],
     totalAmount: 399,
+    deliveryConfirmation: "gps_confirmed",
+    claimFiledWithin24HrsOfDelivery: false,
+    damagePhotoStatus: "matches",
   },
   {
-    // Active case: mattress within 100-day window — should auto-approve
+    // Active case — mattress within 100-day window, should auto-approve
     orderId: "ORD-4006",
     customerId: "C004",
     orderDate: "2026-04-13",
     deliveryDate: "2026-04-20",
     items: [{ itemId: "I-4006", name: "Memory Foam Mattress (Queen)", category: "mattress", price: 899, quantity: 1, nonReturnable: false }],
     totalAmount: 899,
+    deliveryConfirmation: "gps_confirmed",
+    claimFiledWithin24HrsOfDelivery: false,
+    damagePhotoStatus: "not_submitted",
   },
 ];
 
@@ -408,7 +512,7 @@ export const RETURN_HISTORY: ReturnInteraction[] = [
     amountCredited: 450,
   },
 
-  // Jennifer Park — 4 completed appeasement interactions (kept items, got credits)
+  // Jennifer Park — 4 completed appeasement interactions
   {
     interactionId: "INT-2001",
     customerId: "C002",
@@ -417,8 +521,8 @@ export const RETURN_HISTORY: ReturnInteraction[] = [
     itemName: "5-Shelf Bookcase",
     itemValue: 299,
     type: "appeasement",
-    claimDate: "2026-02-12",
-    daysSinceDelivery: 7,
+    claimDate: "2026-03-01",
+    daysSinceDelivery: 24,
     reason: "damaged_on_arrival",
     reasonText: "One shelf has a visible scratch. Sending photo. Would like compensation.",
     keptItem: true,

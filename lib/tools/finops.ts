@@ -185,120 +185,174 @@ export const checkReturnEligibility = tool({
 });
 
 // ---------------------------------------------------------------------------
-// Tool 4: Assess fraud risk
+// Tool 4: Assess fraud risk — deterministic rule-based engine (0-100)
 // ---------------------------------------------------------------------------
 
 export const assessFraudRisk = tool({
   description:
-    "Compute a fraud/abuse risk score (0–1) for a customer based on their return history. Detects wardrobing, appeasement abuse, serial returning, and damage-claim abuse. Returns score, risk level, signal breakdown, and specific evidence.",
+    "Compute a deterministic fraud risk score (0–100) for a specific return request using a pure rule-based engine. Returns a ScoreBreakdown with sub_scores, base_score, and top_signals. Always call after lookupOrder and getCustomerHistory.",
   inputSchema: z.object({
-    customerId: z.string().describe("Customer ID to assess"),
+    customerId: z.string().describe("Customer ID"),
+    orderId: z.string().describe("Order ID for the current return request"),
   }),
-  execute: async ({ customerId }) => {
+  execute: async ({ customerId, orderId }) => {
     const customer = findCustomer(customerId);
+    const order = findOrder(orderId);
     if (!customer) return { error: `Customer ${customerId} not found.` };
+    if (!order) return { error: `Order ${orderId} not found.` };
 
     const interactions = getCustomerInteractions(customerId);
-    const orders = getCustomerOrders(customerId);
-    const returns = interactions.filter((i) => i.type === "return");
-    const appeasements = interactions.filter((i) => i.type === "appeasement");
 
-    // Signal 1: Wardrobing — returns of high-value items ($300+) in the last 5 days of the window (day 25–30)
-    const wardrobingCases = returns.filter(
-      (r) => r.daysSinceDelivery >= 25 && r.itemValue >= 300
+    // ── 1. REFUND HISTORY SCORE (0-30) ───────────────────────────────────────
+    // Count all interactions (returns + appeasements) in the last 90 days
+    const cutoff = new Date(TODAY);
+    cutoff.setDate(cutoff.getDate() - 90);
+    const cutoffStr = cutoff.toISOString().split("T")[0];
+    const recent = interactions.filter((i) => i.claimDate >= cutoffStr);
+    const refundCount90 = recent.length;
+
+    const refundBase =
+      refundCount90 === 0 ? 0
+      : refundCount90 === 1 ? 8
+      : refundCount90 <= 3 ? 18
+      : 28;
+
+    // Bonus if customer has a pattern of filing claims in the last 5 days of the 30-day window
+    const hasLateWindowPattern = interactions.some(
+      (i) => i.daysSinceDelivery >= 25
     );
-    const wardrobingRawScore = Math.min(1.0, wardrobingCases.length / 2);
+    const refundBonus = hasLateWindowPattern ? 5 : 0;
+    const refundScore = Math.min(30, refundBase + refundBonus);
 
-    // Signal 2: Appeasement abuse — keeping items while collecting discounts/credits
-    const appeasementRawScore = Math.min(1.0, appeasements.length / 3);
+    // ── 2. DELIVERY CONFIRMATION SCORE (0-25) ────────────────────────────────
+    const deliveryBaseMap: Record<string, number> = {
+      gps_confirmed: 0,
+      proxy_delivery: 8,
+      carrier_exception: 14,
+      no_scan: 20,
+    };
+    const deliveryBase = deliveryBaseMap[order.deliveryConfirmation] ?? 0;
+    const deliveryBonus = order.claimFiledWithin24HrsOfDelivery ? 5 : 0;
+    const deliveryScore = Math.min(25, deliveryBase + deliveryBonus);
 
-    // Signal 3: Serial returning — return rate above baseline 15%
-    const returnRate = orders.length > 0 ? returns.length / orders.length : 0;
-    const serialRawScore = Math.max(0, Math.min(1.0, (returnRate - 0.15) / 0.35));
+    // ── 3. ORDER HISTORY / LTV SCORE (0-20) ──────────────────────────────────
+    const ltv = customer.totalSpend;
+    const ltvBase =
+      ltv > 2000 ? 0
+      : ltv >= 500 ? 5
+      : ltv >= 100 ? 12
+      : 15;
 
-    // Signal 4: Damage claim abuse — repeated DOA/defective claims
-    const damageClaims = interactions.filter((i) =>
-      ["damaged_on_arrival", "defective", "missing_parts"].includes(i.reason)
-    );
-    const damageRawScore = Math.min(1.0, damageClaims.length / 3);
+    const accountAgeDays = daysBetween(customer.accountCreatedDate, TODAY);
+    const ltvBonus = accountAgeDays < 30 ? 5 : 0;
+    const ltvScore = Math.min(20, ltvBase + ltvBonus);
 
-    // Weighted composite (weights sum to 1.0)
-    const fraudScore =
-      wardrobingRawScore * 0.35 +
-      appeasementRawScore * 0.30 +
-      serialRawScore * 0.25 +
-      damageRawScore * 0.10;
+    // ── 4. DAMAGE PHOTO SCORE (0-15) ─────────────────────────────────────────
+    const photoScoreMap: Record<string, number> = {
+      matches: 0,
+      not_submitted: 8,
+      generic: 12,
+      metadata_mismatch: 15,
+    };
+    const photoScore = photoScoreMap[order.damagePhotoStatus] ?? 0;
 
+    // ── 5. PAYMENT / CHARGEBACK SCORE (0-10) ─────────────────────────────────
+    const chargebackScore =
+      customer.priorChargebacks === 0 ? 0
+      : customer.priorChargebacks === 1 ? 5
+      : 10;
+
+    // ── Composite ────────────────────────────────────────────────────────────
+    const baseScore =
+      refundScore + deliveryScore + ltvScore + photoScore + chargebackScore;
+
+    // ── Top signals: collect all contributing components, sort descending ────
+    const signals: Array<{ label: string; pts: number }> = [];
+
+    if (refundBase > 0) {
+      signals.push({
+        label: `${refundCount90} refund${refundCount90 > 1 ? "s" : ""} in last 90 days`,
+        pts: refundBase,
+      });
+    }
+    if (refundBonus > 0) {
+      signals.push({ label: "Prior claims filed near window deadline", pts: refundBonus });
+    }
+    if (deliveryBase > 0) {
+      const deliveryLabels: Record<string, string> = {
+        proxy_delivery: "Proxy delivery (delivered to neighbor/proxy)",
+        carrier_exception: "Carrier exception on delivery",
+        no_scan: "No delivery scan at destination",
+      };
+      signals.push({
+        label: deliveryLabels[order.deliveryConfirmation] ?? order.deliveryConfirmation,
+        pts: deliveryBase,
+      });
+    }
+    if (deliveryBonus > 0) {
+      signals.push({ label: "Claim filed within 24 hrs of delivery", pts: deliveryBonus });
+    }
+    if (ltvBase > 0) {
+      signals.push({ label: `Low account LTV ($${ltv})`, pts: ltvBase });
+    }
+    if (ltvBonus > 0) {
+      signals.push({ label: "Account age < 30 days", pts: ltvBonus });
+    }
+    if (photoScore > 0) {
+      const photoLabels: Record<string, string> = {
+        not_submitted: "Damage photo not submitted",
+        generic: "Generic/stock damage photos submitted",
+        metadata_mismatch: "Damage photo metadata mismatch",
+      };
+      signals.push({
+        label: photoLabels[order.damagePhotoStatus] ?? order.damagePhotoStatus,
+        pts: photoScore,
+      });
+    }
+    if (chargebackScore > 0) {
+      signals.push({
+        label: `${customer.priorChargebacks} prior chargeback${customer.priorChargebacks > 1 ? "s" : ""}`,
+        pts: chargebackScore,
+      });
+    }
+
+    signals.sort((a, b) => b.pts - a.pts);
+    const topSignals = signals
+      .slice(0, 3)
+      .map((s) => `${s.label} (+${s.pts} pts)`);
+
+    // ── Risk level & recommendation ──────────────────────────────────────────
     const riskLevel =
-      fraudScore >= 0.70
-        ? "CRITICAL"
-        : fraudScore >= 0.50
-        ? "HIGH"
-        : fraudScore >= 0.30
-        ? "MEDIUM"
-        : "LOW";
+      baseScore >= 76 ? "CRITICAL"
+      : baseScore >= 51 ? "HIGH"
+      : baseScore >= 26 ? "MEDIUM"
+      : "LOW";
 
     const recommendation =
-      fraudScore >= 0.70
-        ? "Deny and escalate to fraud investigation team. Do not process refund."
-        : fraudScore >= 0.50
-        ? "Offer store credit only. Flag account for manual review. Require photo documentation."
-        : fraudScore >= 0.30
+      baseScore >= 76
+        ? "Deny and escalate to fraud investigation team. Do not process any refund."
+        : baseScore >= 51
+        ? "Store credit only. Require photo documentation before processing. Flag account for manual review."
+        : baseScore >= 26
         ? "Approve with store credit as preferred option. Add note to account. Monitor future activity."
-        : "Auto-approve per standard policy.";
+        : "Auto-approve per standard policy. Full refund to original payment method.";
 
     return {
       customerId,
-      customerName: customer.name,
-      fraudScore: Math.round(fraudScore * 100) / 100,
+      orderId,
+      scoreBreakdown: {
+        sub_scores: {
+          refundHistory: { score: refundScore, max: 30 },
+          deliveryConfirmation: { score: deliveryScore, max: 25 },
+          orderHistoryLtv: { score: ltvScore, max: 20 },
+          damagePhoto: { score: photoScore, max: 15 },
+          paymentChargeback: { score: chargebackScore, max: 10 },
+        },
+        base_score: baseScore,
+        top_signals: topSignals,
+      },
       riskLevel,
       recommendation,
-      signals: {
-        wardrobing: {
-          score: Math.round(wardrobingRawScore * 100) / 100,
-          weight: "35%",
-          evidence:
-            wardrobingCases.length > 0
-              ? wardrobingCases.map(
-                  (c) =>
-                    `${c.itemName} ($${c.itemValue}) returned on day ${c.daysSinceDelivery} — reason: "${c.reasonText}"`
-                )
-              : ["No wardrobing signals detected"],
-        },
-        appeasementAbuse: {
-          score: Math.round(appeasementRawScore * 100) / 100,
-          weight: "30%",
-          evidence:
-            appeasements.length > 0
-              ? appeasements.map(
-                  (a) =>
-                    `Order ${a.orderId}: claimed "${a.reason}" on ${a.itemName}, kept item, received $${a.amountCredited} credit`
-                )
-              : ["No appeasement abuse detected"],
-        },
-        serialReturner: {
-          score: Math.round(serialRawScore * 100) / 100,
-          weight: "25%",
-          returnRate: `${Math.round(returnRate * 100)}%`,
-          evidence:
-            returnRate > 0.15
-              ? [
-                  `${returns.length} returns out of ${orders.length} orders (${Math.round(returnRate * 100)}% return rate — threshold: 15%)`,
-                ]
-              : ["Return rate within normal range"],
-        },
-        damageClaimAbuse: {
-          score: Math.round(damageRawScore * 100) / 100,
-          weight: "10%",
-          evidence:
-            damageClaims.length > 0
-              ? damageClaims.map(
-                  (d) =>
-                    `Order ${d.orderId}: "${d.reason}" on ${d.itemName} — ${d.keptItem ? "kept item" : "returned item"}`
-                )
-              : ["No damage claim patterns detected"],
-        },
-      },
     };
   },
 });
